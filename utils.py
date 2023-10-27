@@ -2,6 +2,7 @@ import socket
 import random
 import warnings
 import os
+import zmq
 from datetime import datetime
 from configs import CFG, Config
 config = Config.from_json(CFG)
@@ -12,12 +13,16 @@ import queue
 used_ports = []
 
 class ConnectionThread(threading.Thread):
-    def __init__(self, id, send_queue, receive_queue, conn):
+    def __init__(self, id, send_queue, receive_queue, conn, cleanup_callback):
         super().__init__()
         self.id = id  # Unique identifier for this thread
         self.send_queue = send_queue
         self.receive_queue = receive_queue
         self.conn = conn
+        self.cleanup_callback = cleanup_callback
+
+    def cleanup(self):
+        self.cleanup_callback(self.id)
 
     def run(self):
         while True:
@@ -28,9 +33,13 @@ class ConnectionThread(threading.Thread):
             else:
                 self.conn.send(message_to_send)
 
-            data = self.conn.recv(4096)
+            data = self.conn.recv()
             if data:
                 self.receive_queue.put((self.id, data))  # Include the thread id with the data
+            else:
+                # Connection is closed
+                self.cleanup()
+                break
 
 
 

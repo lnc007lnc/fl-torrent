@@ -8,6 +8,7 @@ import time
 from itertools import groupby
 import mmap
 import warnings
+import zmq
 warnings.filterwarnings("ignore")
 
 # implemented classes
@@ -15,6 +16,7 @@ from configs import CFG, Config
 config = Config.from_json(CFG)
 from messages.message import Message
 from messages.node2tracker import Node2Tracker
+from messages.command import Command
 from messages.node2node import Node2Node
 from messages.chunk_sharing import ChunkSharing
 from segment import UDPSegment
@@ -36,15 +38,17 @@ class Node:
         self.threads = {}  # Dictionary to hold ConnectionThread instances
         self.receive_queue = queue.Queue()  # Single queue for received data
 
+
     #####################################network function############################
 
     #creat node-tracker or node-node connection
     def create_connection(self, addr):
         send_queue = queue.Queue()
-        thread_id = f'{addr[0]}:{addr[1]}'  # Create a unique id for this thread
+        thread_id = addr  # Create a unique id for this thread
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         conn.connect(addr)
-        thread = ConnectionThread(thread_id, send_queue, self.receive_queue, conn)
+        print("Connect "+addr+" successfully")
+        thread = ConnectionThread(thread_id, send_queue, self.receive_queue, conn, self.cleanup_callback)
         self.threads[thread_id] = (thread, send_queue)  # Store the thread and its send_queue
         thread.start()
 
@@ -52,9 +56,9 @@ class Node:
     def accept_connections(self):
         while True:
             conn, addr = self.listen_socket.accept()  # Accept a new connection
-            thread_id = f'{addr[0]}:{addr[1]}'  # Create a unique id for this thread
+            thread_id = addr  # Create a unique id for this thread
             send_queue = queue.Queue()
-            thread = ConnectionThread(thread_id, send_queue, self.receive_queue, conn)
+            thread = ConnectionThread(thread_id, send_queue, self.receive_queue, conn, self.cleanup_callback)
             self.threads[thread_id] = (thread, send_queue)
             thread.start()
 
@@ -63,8 +67,16 @@ class Node:
         accept_thread = threading.Thread(target=self.accept_connections)
         accept_thread.start()
 
+    # call back to clean the link thread
+    def cleanup_callback(self, thread_id):
+        if thread_id in self.threads:
+            _, send_queue = self.threads[thread_id]
+            del self.threads[thread_id]
+
+
     def send_data(self, thread_id, data):
         # Find the thread and send_queue for the given id
+        data=Message.encode(data)
         thread, send_queue = self.threads[thread_id]
         send_queue.put(data)
 
@@ -74,12 +86,13 @@ class Node:
             tracker_send_queue = queue.Queue()
             conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             conn.connect(tuple(config.constants.TRACKER_ADDR))
-            tracker_thread = ConnectionThread(tracker_id, tracker_send_queue, self.receive_queue,conn)
+            tracker_thread = ConnectionThread(tracker_id, tracker_send_queue, self.receive_queue,conn,self.cleanup_callback)
             self.threads[tracker_id] = (tracker_thread, tracker_send_queue)
+            msg = Command(command=config.command.LISTEN_PORT, extra_information=self.listen_port)
+            self.send_data(thread_id='tracker', data=msg)
+            msg1 = Command(command=config.command.REQUEST_LINKLIST, extra_information=self.listen_port)
+            self.send_data(thread_id='tracker', data=msg1)
             tracker_thread.start()  # Start the thread to handle the tracker connection
-
-        msg = Node2Tracker(node_id=self.node_id, filename="")
-        self.send_data(thread_id='tracker',data=Message.encode(msg))
 
         log_content = f"You entered Torrent."
         log(node_id=self.node_id, content=log_content)
@@ -221,8 +234,24 @@ class Node:
         return files
 
     ##############################################process command###############################
-    def process_command(self, command):
-        pass
+    def process_command(self, data):
+        print("command")
+        print("command")
+        print("command")
+        command=data['command']
+        if command==config.command.CONN:
+            print("config.command.CONN")
+            print("config.command.CONN")
+            print("config.command.CONN")
+            linklist=data['extra_information']
+            for thread_id in linklist:
+                self.create_connection(addr=thread_id)
+            neighbour_list=self.threads.keys()
+            neighbour_command=Command(command=config.command.NEIGHBOUR,extra_information=neighbour_list)
+            self.send_data(thread_id='tracker',data=neighbour_command) #tells the tracker node's neighbour
+        elif command==config.command.SEND:
+            pass
+
 
     ##############################################run##############################################
     def run(self):
@@ -238,6 +267,7 @@ class Node:
             except queue.Empty:
                 continue  # No data received, continue to the next iteration
             # Process the received data
+            received_data=Message.decode(received_data)
             self.process_command(received_data)
 
         # input command manually for debugging
