@@ -2,12 +2,14 @@ import socket
 import random
 import warnings
 import os
-import zmq
 from datetime import datetime
 from configs import CFG, Config
 config = Config.from_json(CFG)
 import threading
 import queue
+import select
+import struct
+from messages.message import Message
 
 # global variables
 used_ports = []
@@ -20,27 +22,68 @@ class ConnectionThread(threading.Thread):
         self.receive_queue = receive_queue
         self.conn = conn
         self.cleanup_callback = cleanup_callback
+        self.conn.setblocking(0)  # Set socket to non-blocking mode
+        self.send_buffer = b''  # Initialize send buffer
+        self.recv_buffer = b''
 
     def cleanup(self):
         self.cleanup_callback(self.id)
 
     def run(self):
-        while True:
+        inputs = [self.conn]
+        outputs = []
+        while inputs:
             try:
-                message_to_send = self.send_queue.get_nowait()
+                if not self.send_buffer:
+                    message = self.send_queue.get_nowait()
+                    # Prefix each message with a 4-byte length (network byte order)
+                    self.send_buffer = struct.pack('!I', len(message)) + message
+                    outputs.append(self.conn)
             except queue.Empty:
                 pass
-            else:
-                self.conn.send(message_to_send)
 
-            data = self.conn.recv()
-            if data:
-                self.receive_queue.put((self.id, data))  # Include the thread id with the data
-            else:
-                # Connection is closed
+            readable, writable, exceptional = select.select(inputs, outputs, inputs, 0.1)
+
+            for s in writable:
+                try:
+                    sent = s.send(self.send_buffer)
+                    self.send_buffer = self.send_buffer[sent:]
+                    if not self.send_buffer:
+                        outputs.remove(s)
+                except (socket.error, BlockingIOError):
+                    pass
+
+            for s in readable:
+                try:
+                    # Receive data chunk
+                    data = s.recv(4096)
+                    if data:
+                        self.recv_buffer += data
+                        # Process complete messages
+                        while len(self.recv_buffer) >= 4:  # Assuming 4-byte header
+                            # Extract the message length
+                            message_len = struct.unpack('!I', self.recv_buffer[:4])[0]
+                            # Check if the buffer has enough bytes for the message
+                            if len(self.recv_buffer) >= 4 + message_len:
+                                # Extract the message
+                                message = self.recv_buffer[4:4 + message_len]
+                                self.receive_queue.put((self.id, message))
+                                # Remove the message from buffer
+                                self.recv_buffer = self.recv_buffer[4 + message_len:]
+                            else:
+                                break
+                    else:
+                        self.cleanup()
+                        inputs.remove(s)
+                        break
+                except (socket.error, BlockingIOError):
+                    break
+
+            for s in exceptional:
                 self.cleanup()
-                break
-
+                inputs.remove(s)
+                if s in outputs:
+                    outputs.remove(s)
 
 
 def set_socket(port: int) -> socket.socket:

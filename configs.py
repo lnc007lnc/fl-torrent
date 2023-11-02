@@ -9,7 +9,7 @@ CFG = {
     },
     "constants": {
         "AVAILABLE_PORTS_RANGE": (1024, 65535), # range of available ports on the local computer
-        "TRACKER_ADDR": ('localhost', 12345),
+        "TRACKER_ADDR": ('localhost', 12348),
         #"TRACKER_ADDR": ('0.0.0.0', 12345),
         "MAX_UDP_SEGMENT_DATA_SIZE": 65527,
         "BUFFER_SIZE": 9216,        # MACOSX UDP MTU is 9216

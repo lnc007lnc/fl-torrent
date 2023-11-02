@@ -37,6 +37,8 @@ class Node:
         self.downloaded_files = {}
         self.threads = {}  # Dictionary to hold ConnectionThread instances
         self.receive_queue = queue.Queue()  # Single queue for received data
+        self.neighbour_list=[]
+        self.last_neighbour_list=[]
 
 
     #####################################network function############################
@@ -47,7 +49,6 @@ class Node:
         thread_id = addr  # Create a unique id for this thread
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         conn.connect(addr)
-        print("Connect "+addr+" successfully")
         thread = ConnectionThread(thread_id, send_queue, self.receive_queue, conn, self.cleanup_callback)
         self.threads[thread_id] = (thread, send_queue)  # Store the thread and its send_queue
         thread.start()
@@ -92,6 +93,7 @@ class Node:
             self.send_data(thread_id='tracker', data=msg)
             msg1 = Command(command=config.command.REQUEST_LINKLIST, extra_information=self.listen_port)
             self.send_data(thread_id='tracker', data=msg1)
+            print("22222222222222")
             tracker_thread.start()  # Start the thread to handle the tracker connection
 
         log_content = f"You entered Torrent."
@@ -235,20 +237,11 @@ class Node:
 
     ##############################################process command###############################
     def process_command(self, data):
-        print("command")
-        print("command")
-        print("command")
         command=data['command']
         if command==config.command.CONN:
-            print("config.command.CONN")
-            print("config.command.CONN")
-            print("config.command.CONN")
             linklist=data['extra_information']
             for thread_id in linklist:
                 self.create_connection(addr=thread_id)
-            neighbour_list=self.threads.keys()
-            neighbour_command=Command(command=config.command.NEIGHBOUR,extra_information=neighbour_list)
-            self.send_data(thread_id='tracker',data=neighbour_command) #tells the tracker node's neighbour
         elif command==config.command.SEND:
             pass
 
@@ -263,6 +256,15 @@ class Node:
         # receive command from the other
         while True:
             try:
+                # monitor the change of neighbour list
+                self.neighbour_list = list(self.threads.keys())
+                self.neighbour_list.remove('tracker')
+                if self.last_neighbour_list != self.neighbour_list:
+                    neighbour_command = Command(command=config.command.NEIGHBOUR, extra_information=self.neighbour_list)
+                    self.send_data(thread_id='tracker', data=neighbour_command)  # tells the tracker node's neighbour
+                    self.last_neighbour_list = self.neighbour_list
+                    print(self.neighbour_list)
+
                 thread_id, received_data = self.receive_queue.get_nowait()
             except queue.Empty:
                 continue  # No data received, continue to the next iteration

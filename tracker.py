@@ -5,12 +5,11 @@ import json
 import datetime
 import time
 import warnings
-import zmq
 warnings.filterwarnings("ignore")
 
 # implemented classes
 from utils import *
-from messages.message import  Message
+from messages.message import Message
 from messages.tracker2node import Tracker2Node
 from messages.command import Command
 from segment import UDPSegment
@@ -63,11 +62,11 @@ class Tracker:
             _, send_queue = self.threads[thread_id]
             del self.threads[thread_id]
             del self.nodedict[thread_id]
+            del self.neighbour_list[thread_id]
 
     #randomly choose link list for new node
     def return_linklist(self,node_id,num):
         templist=list(self.nodedict.keys())
-        print(templist)
         if node_id in templist:
             templist.remove(node_id)
         random_node_list=random.sample(templist,min(num,len(templist)))
@@ -143,30 +142,20 @@ class Tracker:
 
     ##############################################process command###############################
     def process_command(self, data, thread_id):
-        print("command")
-        print("command")
-        print("command")
         command=data['command']
         if command==config.command.NEIGHBOUR:
             print("config.command.NEIGHBOUR")
-            print("config.command.NEIGHBOUR")
-            print("config.command.NEIGHBOUR")
             neighbour_list=data['extra_information']
             self.neighbour_list[thread_id]=neighbour_list
-            for key in neighbour_list:
-                print(key+":"+self.neighbour_list[key])
+            for key in self.neighbour_list:
+                print(key[0] + ":" + str(key[1]) + "  :" + ''.join(str(item) for item in self.neighbour_list[key]))
         elif command==config.command.LISTEN_PORT:
-            print("config.command.LISTEN_PORT")
-            print("config.command.LISTEN_PORT")
-            print("config.command.LISTEN_PORT")
+            #print("config.command.LISTEN_PORT")
             listen_port=data['extra_information']
             self.nodedict[thread_id]=(thread_id[0],listen_port)
-            print(self.nodedict.keys())
+            #print(list(self.nodedict.keys()))
         elif command==config.command.REQUEST_LINKLIST:
-            print("config.command.REQUEST_LINKLIST")
-            print("config.command.REQUEST_LINKLIST")
-            print("config.command.REQUEST_LINKLIST")
-
+            #print("config.command.REQUEST_LINKLIST")
             linklist=self.return_linklist(thread_id,config.constants.MIN_NODE_CONNECTION)
             command=Command(command=config.command.CONN,extra_information=linklist)
             self.send_data(thread_id,command)
@@ -187,7 +176,6 @@ class Tracker:
                 continue  # No data received, continue to the next iteration
             # Process the received data
             received_data = Message.decode(received_data)
-            print(received_data)
             self.process_command(received_data, thread_id)
 
 if __name__ == '__main__':
