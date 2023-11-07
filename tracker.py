@@ -32,6 +32,16 @@ class Tracker:
         self.has_informed_tracker = defaultdict(bool)
         self.threads = {}  # Dictionary to hold ConnectionThread instances
         self.receive_queue = queue.Queue()  # Single queue for received data
+        self.node_owntable={}
+        self.algo_flag=None
+        #for test
+        self.ok_nodes=0
+        self.finish_program_num=0 #for detecting node's file transfer ending
+        self.finish_time=0
+        self.input_flag=True #for input command manualy
+        self.torrent_flag=False #let nodes go to normal bittorrent protocal
+        self.start_time=0
+
 
 
     #####################################network function############################
@@ -40,6 +50,11 @@ class Tracker:
         thread, send_queue = self.threads[thread_id]
         data=Message.encode(data)
         send_queue.put(data)
+
+    #send data to all nodes
+    def send_data_all(self, data):
+        for thread_id in self.threads.keys():
+            self.send_data(thread_id,data)
 
     def accept_connections(self):
         while True:
@@ -150,15 +165,66 @@ class Tracker:
             for key in self.neighbour_list:
                 print(key[0] + ":" + str(key[1]) + "  :" + ''.join(str(item) for item in self.neighbour_list[key]))
         elif command==config.command.LISTEN_PORT:
-            #print("config.command.LISTEN_PORT")
             listen_port=data['extra_information']
             self.nodedict[thread_id]=(thread_id[0],listen_port)
-            #print(list(self.nodedict.keys()))
+        elif command==config.command.OK_START:
+            self.ok_nodes+=1
         elif command==config.command.REQUEST_LINKLIST:
-            #print("config.command.REQUEST_LINKLIST")
             linklist=self.return_linklist(thread_id,config.constants.MIN_NODE_CONNECTION)
             command=Command(command=config.command.CONN,extra_information=linklist)
             self.send_data(thread_id,command)
+        elif command==config.command.FINISH_SEND:
+            print("Finish one!")
+            send_time=data['extra_information']
+            self.finish_time=max(self.finish_time,send_time-self.start_time)
+            self.finish_program_num+=1
+        elif command==config.command.OWNTABLE_RECV:
+            self.node_owntable[thread_id]=data['extra_information']
+
+    #start normal torrent
+    def torrent(self):
+        data = Command(command=config.command.TORRENT, extra_information=None)
+        self.send_data_all(data=data)
+
+    # scheduling algorithm1: Heuristics Random-FIFO
+    def random_fifo(self):
+        if self.torrent_flag:
+            self.torrent()
+
+    # scheduling algorithm2: Heuristics Random-Fastest-Fast
+    def random_fastest_fast(self):
+        if self.torrent_flag:
+            self.torrent()
+
+    # scheduling algorithm3: Heuristics Greedy-Fastest-Fast
+    def greedy_fastest_fast(self):
+        if self.torrent_flag:
+            self.torrent()
+
+    # scheduling algorithm4: Max flow
+    def max_flow(self):
+        if self.torrent_flag:
+            self.torrent()
+
+    def choose_algo(self, command):
+        if command == 'send':  # nomal torrent share file
+            self.algo_flag='send'
+            self.torrent()
+        elif command == 'randomfifo':  # scheduling algorithm1: Heuristics Random-FIFO
+            self.algo_flag = 'randomfifo'
+            self.random_fifo()
+        elif command == 'randomfastestfast':  # scheduling algorithm2: Heuristics Random-Fastest-Fast
+            self.algo_flag = 'randomfastestfast'
+            self.random_fastest_fast()
+        elif command == 'greedyfastestfast':  # scheduling algorithm3: Heuristics Greedy-Fastest-Fast
+            self.algo_flag = 'greedyfastestfast'
+            self.greedy_fastest_fast()
+        elif command == 'maxflow':  # scheduling algorithm4: Max flow
+            self.algo_flag = 'maxflow'
+            self.max_flow()
+        else:
+            print("WRONG COMMAND!")
+            self.input_flag = True
 
 
 
@@ -166,17 +232,49 @@ class Tracker:
         log_content = f"***************** Tracker program started just right now! *****************"
         log(node_id=0, content=log_content, is_tracker=True)
         self.start_accepting_connections()
-        #self.accept_connections()
 
         # receive command from the other
         while True:
             try:
                 thread_id, received_data = self.receive_queue.get_nowait()
+                received_data = Message.decode(received_data)
+                # Process the received data
+                self.process_command(received_data, thread_id)
+
+                # if the node num equal to the setting num, start test
+                if self.ok_nodes == config.constants.TEST_NODE_NUM and self.input_flag:
+                    print(self.ok_nodes)
+                    print(config.constants.TEST_NODE_NUM)
+                    self.input_flag = False  # stop input command
+                    # send the network node list to every node
+                    node_list = list(self.threads.keys())
+                    data = Command(command=config.command.NETWORK_LIST, extra_information=node_list)
+                    self.send_data_all(data=data)
+                    print("ENTER YOUR COMMAND!")
+                    command = input()
+                    self.start_time = time.time()
+                    self.choose_algo(command)
+
+                # whole program finished
+                if self.finish_program_num == self.ok_nodes and self.input_flag == False:
+                    print(f"PROGRAM FINISHED! TOTAL TIME: {self.finish_time:.3f} seconds")
+                    self.input_flag = True
+                    self.finish_program_num = 0
             except queue.Empty:
                 continue  # No data received, continue to the next iteration
-            # Process the received data
-            received_data = Message.decode(received_data)
-            self.process_command(received_data, thread_id)
+
+            if self.algo_flag in ['send','randomfifo','randomfastestfast','greedyfastestfast','maxflow']:
+                self.choose_algo(self.algo_flag)
+
+
+
+
+
+
+
+
+
+
 
 if __name__ == '__main__':
     t = Tracker()
