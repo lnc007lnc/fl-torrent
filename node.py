@@ -13,6 +13,8 @@ import mmap
 import warnings
 import numpy as np
 warnings.filterwarnings("ignore")
+import uuid
+import gc
 
 # implemented classes
 from configs import CFG, Config
@@ -32,6 +34,7 @@ class Node:
         self.listen_socket.bind(('localhost', listen_port))
         self.node_addr=self.listen_socket.getsockname()
         self.node_id=None
+        self.uuid=uuid.uuid4()
         self.listen_socket.listen(5)  # Listen for incoming connections, with a backlog of 5
         #self.files = self.generate_file()
         self.downloaded_files = {}
@@ -40,16 +43,20 @@ class Node:
         self.neighbour_list=[]
         self.last_neighbour_list=[]
         self.neighbour_owntable={}
+        self.neighbour_sent=[]
         self.lock = threading.Lock()
         #for test
         self.ready_flag=False
         self.network_list=[]
-        self.uplink_limit=0
-        self.downlink_limit=0
+        self.uplink_limit=random.randint(50, 100)
+        self.downlink_limit=random.randint(400, 800)
         self.own_table=None
-        #self.random_data=bytes(random.getrandbits(8)for _ in range(config.constants.CHUNK_SIZE))
-        self.random_data=None
+        self.old_chunk_num=None
+        self.random_data=bytes(random.getrandbits(8)for _ in range(config.constants.CHUNK_SIZE))
+        #self.random_data=None
         self.count=0
+
+        self.debug_count=0
 
 
 
@@ -58,22 +65,28 @@ class Node:
     #creat node-tracker or node-node connection
     def create_connection(self, addr):
         send_queue = queue.Queue()
-        thread_id = addr  # Create a unique id for this thread
         conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         conn.connect(addr)
-        thread = ConnectionThread(thread_id, send_queue, self.receive_queue, conn, self.cleanup_callback)
-        self.threads[thread_id] = (thread, send_queue)  # Store the thread and its send_queue
+        thread = ConnectionThread(send_queue, self.receive_queue, conn, self.cleanup_callback, self.uuid,
+                                  self.uplink_limit, self.downlink_limit)
         thread.start()
+        thread.initialized.wait()
+
+        thread_id = thread.id  # Create a unique id for this thread
+        self.threads[thread_id] = (thread, send_queue)  # Store the thread and its send_queue
 
     #receive the other node connection request and initialize
     def accept_connections(self):
         while True:
             conn, addr = self.listen_socket.accept()  # Accept a new connection
-            thread_id = addr  # Create a unique id for this thread
             send_queue = queue.Queue()
-            thread = ConnectionThread(thread_id, send_queue, self.receive_queue, conn, self.cleanup_callback)
-            self.threads[thread_id] = (thread, send_queue)
+            thread = ConnectionThread(send_queue, self.receive_queue, conn, self.cleanup_callback, self.uuid,
+                                      self.uplink_limit, self.downlink_limit)
             thread.start()
+            thread.initialized.wait()
+
+            thread_id = thread.id
+            self.threads[thread_id] = (thread, send_queue)
 
     # Start a new thread to accept connections
     def start_accepting_connections(self):
@@ -94,22 +107,24 @@ class Node:
         send_queue.put(data)
 
     def connect_tracker(self):
-        tracker_id = 'tracker'
-        if tracker_id not in self.threads:
+        if 'tracker' not in self.threads:
             tracker_send_queue = queue.Queue()
             conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             conn.connect(tuple(config.constants.TRACKER_ADDR))
             self.node_id=conn.getsockname()
-            tracker_thread = ConnectionThread(tracker_id, tracker_send_queue, self.receive_queue,conn,self.cleanup_callback)
-            self.threads[tracker_id] = (tracker_thread, tracker_send_queue)
-            msg = Command(command=config.command.LISTEN_PORT, extra_information=self.listen_port)
+            tracker_thread = ConnectionThread(tracker_send_queue, self.receive_queue,conn,self.cleanup_callback, self.uuid,
+                                              self.uplink_limit, self.downlink_limit)
+            self.threads['tracker'] = (tracker_thread, tracker_send_queue)
+            tracker_thread.start()  # Start the thread to handle the tracker connection
+            #tracker_thread.join(1)
+
+            msg = Command(command=config.command.LISTEN_PORT, extra_information=(self.node_id[0],self.listen_port,self.uplink_limit,self.downlink_limit))
             self.send_data(thread_id='tracker', data=msg)
             msg1 = Command(command=config.command.REQUEST_LINKLIST, extra_information=self.listen_port)
             self.send_data(thread_id='tracker', data=msg1)
-            tracker_thread.start()  # Start the thread to handle the tracker connection
 
         log_content = f"You entered Torrent."
-        log(node_id=self.node_id, content=log_content)
+        log(node_id=self.uuid, content=log_content)
 
     #############################################Torrent function##############################
     # Generate a file for testing
@@ -264,28 +279,20 @@ class Node:
 
     ##############################################process command###############################
     def process_command(self, data,thread_id):
+        print('command')
         command=data['command']
         if command==config.command.CONN:
             linklist=data['extra_information']
             for thread_id in linklist:
                 self.create_connection(addr=thread_id)
-            command_send = Command(command=config.command.OK_START, extra_information=None)
-            self.send_data(thread_id='tracker', data=command_send)
         elif command==config.command.NETWORK_LIST:
             self.network_list=data['extra_information']
-            index_own = self.network_list.index(self.node_id)
+            index_own = self.network_list.index(str(self.uuid))
             length = int(config.constants.GENERATE_FILE_SIZE / config.constants.CHUNK_SIZE)
             width = len(self.network_list)
             self.own_table = np.zeros((length, width))  # Create a 2D numpy array of zeros with the correct shape
             self.own_table[:, index_own] = 1  # Set all values in the column corresponding to `self.node_id` to 1
-        elif command==config.command.TORRENT:
-            print('TORRENT')
-            self.ready_flag=True
-            data = Command(command=config.command.NODE_OWNTABLE, extra_information=self.own_table)
-            for thead_id in self.neighbour_list:
-                self.send_data(thread_id=thead_id, data=data)
-            thread = threading.Thread(target=self.torrent)
-            thread.start()
+            self.old_chunk_num=self.own_table.sum()
         elif command==config.command.NODE_OWNTABLE and self.ready_flag:
             print('OWNTABLE')
             with self.lock:
@@ -301,13 +308,82 @@ class Node:
         elif command==config.command.CHUNK:
             print('CHUNK')
             i,j,_=data['extra_information']
+            print((i,j))
+            flag=data['flag']
             self.own_table[i,j]=1
-            print(self.own_table)
+
+            if thread_id in self.neighbour_sent:
+                self.neighbour_sent.remove(thread_id)
+
+            if flag==config.command.RANDOM_FIFO:
+                now_chunk_num=self.own_table.sum()
+                if now_chunk_num-self.old_chunk_num>=config.constants.MIN_CHUNK_LIMIT:
+                    command_send = Command(command=config.command.OK_TORRENT, extra_information=None)
+                    self.send_data(thread_id='tracker', data=command_send)
+                elif self.neighbour_sent==[]: #keep asking the tracker
+                    command_send = Command(command=config.command.OWNTABLE_RECV, extra_information=self.own_table,
+                                           flag=config.command.RANDOM_FIFO)
+                    self.send_data('tracker', command_send)
+                print(self.own_table)
+            elif flag==config.command.RANDOM_FASTEST_FAST:
+                now_chunk_num = self.own_table.sum()
+                if now_chunk_num - self.old_chunk_num >= config.constants.MIN_CHUNK_LIMIT:
+                    command_send = Command(command=config.command.OK_TORRENT, extra_information=None)
+                    self.send_data(thread_id='tracker', data=command_send)
+                elif self.neighbour_sent == []:  # keep asking the tracker
+                    command_send = Command(command=config.command.OWNTABLE_RECV, extra_information=self.own_table,
+                                           flag=config.command.RANDOM_FASTEST_FAST)
+                    self.send_data('tracker', command_send)
+                print(self.own_table)
+            elif flag==config.command.GREEDY_FASTEST_FAST:
+                now_chunk_num = self.own_table.sum()
+                if now_chunk_num - self.old_chunk_num >= config.constants.MIN_CHUNK_LIMIT:
+                    command_send = Command(command=config.command.OK_TORRENT, extra_information=None)
+                    self.send_data(thread_id='tracker', data=command_send)
+                elif self.neighbour_sent == []:  # keep asking the tracker
+                    command_send = Command(command=config.command.OWNTABLE_RECV, extra_information=self.own_table,
+                                           flag=config.command.GREEDY_FASTEST_FAST)
+                    self.send_data('tracker', command_send)
+                print(self.own_table)
         elif command==config.command.SEND:
-            pass
+            matching_coordinates = data['extra_information']
+            flag=data['flag']
+            recv=data['recv']
+            for i,j in matching_coordinates:
+                command_send = Command(command=config.command.CHUNK, extra_information=(i, j, self.random_data),
+                                       flag=flag)
+                self.send_data(thread_id=recv, data=command_send)
         elif command==config.command.OWNTABLE2TRACKER:
-            command_send=Command(command=config.command.OWNTABLE_RECV, extra_information=self.own_table)
+            print('config.command.OWNTABLE2TRACKER')
+            flag=data['flag']
+            command_send=Command(command=config.command.OWNTABLE_RECV, extra_information=self.own_table, flag=flag)
             self.send_data('tracker',command_send)
+
+        elif command==config.command.TORRENT:
+            print('TORRENT')
+            self.ready_flag=True
+            data = Command(command=config.command.NODE_OWNTABLE, extra_information=self.own_table)
+            for thread_id in self.neighbour_list:
+                self.send_data(thread_id=thread_id, data=data)
+            thread = threading.Thread(target=self.torrent)
+            thread.start()
+        elif command==config.command.CLEAR_ALL:
+            self.ready_flag = False
+
+            index_own = self.network_list.index(str(self.uuid))
+            length = int(config.constants.GENERATE_FILE_SIZE / config.constants.CHUNK_SIZE)
+            width = len(self.network_list)
+            self.own_table = np.zeros((length, width))  # Create a 2D numpy array of zeros with the correct shape
+            self.own_table[:, index_own] = 1  # Set all values in the column corresponding to `self.node_id` to 1
+            self.old_chunk_num = self.own_table.sum()
+
+            self.count = 0
+            self.debug_count = 0
+            # clear queue
+            while not self.receive_queue.empty():
+                self.receive_queue.get()
+                self.receive_queue.task_done()
+            print(self.own_table)
 
     def torrent(self):
         temp_table=None
@@ -326,18 +402,16 @@ class Node:
                 with self.lock:
                     for thread_id in self.neighbour_owntable.keys():
                         require_table = 1 - self.own_table
-                        print('neighbour_owntable')
-                        print(self.neighbour_owntable[thread_id])
-                        print('require_table')
-                        print(require_table)
                         print('own_table')
                         print(self.own_table)
                         both_one = np.logical_and(self.neighbour_owntable[thread_id], require_table)
                         coordinates = np.where(both_one)
                         matching_coordinates = list(zip(coordinates[0], coordinates[1]))
+                        # k = min(config.constants.MAGIC_FIFO_NUM, len(matching_coordinates))
+                        # random_selection = random.sample(matching_coordinates, k)
                         command_send = Command(command=config.command.NODE_REQUEST, extra_information=matching_coordinates)
                         self.send_data(thread_id=thread_id, data=command_send)
-                time.sleep(0.5)
+                time.sleep(5)
         exit()
 
 
@@ -363,15 +437,17 @@ class Node:
 
         # receive command from the other
         while True:
+            gc.collect()
             try:
                 # monitor the change of neighbour list
                 self.neighbour_list = list(self.threads.keys())
                 self.neighbour_list.remove('tracker')
+                self.neighbour_sent=self.neighbour_list.copy()
                 if set(self.last_neighbour_list) != set(self.neighbour_list):
                     neighbour_command = Command(command=config.command.NEIGHBOUR, extra_information=self.neighbour_list)
                     self.send_data(thread_id='tracker', data=neighbour_command)  # tells the tracker node's neighbour
-                    self.last_neighbour_list = self.neighbour_list
-                    print(self.neighbour_list)
+                    self.last_neighbour_list = self.neighbour_list.copy()
+                    self.neighbour_sent = self.neighbour_list.copy()
 
                 thread_id, received_data = self.receive_queue.get_nowait()
                 # Process the received data

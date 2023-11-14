@@ -15,6 +15,7 @@ from messages.command import Command
 from segment import UDPSegment
 from configs import CFG, Config
 config = Config.from_json(CFG)
+import numpy as np
 
 next_call = time.time()
 
@@ -29,18 +30,22 @@ class Tracker:
         self.send_freq_list = defaultdict(int)
         self.neighbour_list = defaultdict(list)
         self.nodedict= {}
+        self.node_limit={}
         self.has_informed_tracker = defaultdict(bool)
         self.threads = {}  # Dictionary to hold ConnectionThread instances
         self.receive_queue = queue.Queue()  # Single queue for received data
         self.node_owntable={}
-        self.algo_flag=None
+        self.own_table_num=0
+        self.uuid='tracker'
+        self.uplink_limit=100000
+        self.downlink_limit=100000
         #for test
-        self.ok_nodes=0
+        self.ok_torrent = 0
         self.finish_program_num=0 #for detecting node's file transfer ending
         self.finish_time=0
         self.input_flag=True #for input command manualy
-        self.torrent_flag=False #let nodes go to normal bittorrent protocal
         self.start_time=0
+        self.debug_count=0
 
 
 
@@ -59,11 +64,14 @@ class Tracker:
     def accept_connections(self):
         while True:
             conn, addr = self.listen_socket.accept()  # Accept a new connection
-            thread_id = addr  # Create a unique id for this thread
             send_queue = queue.Queue()
-            thread = ConnectionThread(thread_id, send_queue, self.receive_queue, conn, self.cleanup_callback)
-            self.threads[thread_id] = (thread, send_queue)
+            thread = ConnectionThread(send_queue, self.receive_queue, conn, self.cleanup_callback, self.uuid,
+                                      self.uplink_limit, self.downlink_limit)
             thread.start()
+            thread.initialized.wait()
+
+            thread_id = thread.id
+            self.threads[thread_id] = (thread, send_queue)
 
 
     # Start a new thread to accept connections
@@ -162,13 +170,16 @@ class Tracker:
             print("config.command.NEIGHBOUR")
             neighbour_list=data['extra_information']
             self.neighbour_list[thread_id]=neighbour_list
-            for key in self.neighbour_list:
-                print(key[0] + ":" + str(key[1]) + "  :" + ''.join(str(item) for item in self.neighbour_list[key]))
+            # for key in self.neighbour_list:
+            #     print(key[0] + ":" + str(key[1]) + "  :" + ''.join(str(item) for item in self.neighbour_list[key]))
         elif command==config.command.LISTEN_PORT:
-            listen_port=data['extra_information']
-            self.nodedict[thread_id]=(thread_id[0],listen_port)
-        elif command==config.command.OK_START:
-            self.ok_nodes+=1
+            ip,port,uplink,downlink=data['extra_information']
+            print(data['extra_information'])
+            self.nodedict[thread_id]=(ip,port)
+            self.node_limit[thread_id]=(uplink,downlink)
+        elif command==config.command.OK_TORRENT:
+            self.ok_torrent+=1
+            #print(f'ok_torrent: {self.ok_torrent}')
         elif command==config.command.REQUEST_LINKLIST:
             linklist=self.return_linklist(thread_id,config.constants.MIN_NODE_CONNECTION)
             command=Command(command=config.command.CONN,extra_information=linklist)
@@ -180,6 +191,25 @@ class Tracker:
             self.finish_program_num+=1
         elif command==config.command.OWNTABLE_RECV:
             self.node_owntable[thread_id]=data['extra_information']
+            flag=data['flag']
+            self.own_table_num += 1
+            if flag == config.command.RANDOM_FIFO:
+                if self.own_table_num == config.constants.TEST_NODE_NUM:  # first time
+                    for loop_thread_id in self.threads.keys():
+                        self.random_fifo(thread_id=loop_thread_id)
+            elif flag==config.command.RANDOM_FASTEST_FAST:
+                if self.own_table_num == config.constants.TEST_NODE_NUM:  # first time
+                    for loop_thread_id in self.threads.keys():
+                        self.random_fastest_fast(thread_id=loop_thread_id)
+            elif flag==config.command.GREEDY_FASTEST_FAST:
+                if self.own_table_num == config.constants.TEST_NODE_NUM:  # first time
+                    for loop_thread_id in self.threads.keys():
+                        self.greedy_fastest_fast(thread_id=loop_thread_id)
+
+
+
+
+
 
     #start normal torrent
     def torrent(self):
@@ -187,40 +217,90 @@ class Tracker:
         self.send_data_all(data=data)
 
     # scheduling algorithm1: Heuristics Random-FIFO
-    def random_fifo(self):
-        if self.torrent_flag:
-            self.torrent()
+    def random_fifo(self,thread_id=None):
+        if self.own_table_num ==config.constants.TEST_NODE_NUM and thread_id!=None:
+            neighbour_list = self.neighbour_list[thread_id]
+            require_table = 1 - self.node_owntable[thread_id]
+            for neighbour in neighbour_list:
+                neighbour_has_table = self.node_owntable[neighbour]
+                both_one = np.logical_and(neighbour_has_table, require_table)
+                coordinates = np.where(both_one)
+                matching_coordinates = list(zip(coordinates[0], coordinates[1]))
+                k = min(config.constants.MAGIC_FIFO_NUM, len(matching_coordinates))
+                random_selection = random.sample(matching_coordinates, k)
+                command_send = Command(command=config.command.SEND, extra_information=random_selection,
+                                       flag=config.command.RANDOM_FIFO, recv=thread_id)
+                self.send_data(thread_id=neighbour, data=command_send)
+        else:
+            data = Command(command=config.command.OWNTABLE2TRACKER,
+                           extra_information=None, flag=config.command.RANDOM_FIFO)
+            self.send_data_all(data=data)
 
     # scheduling algorithm2: Heuristics Random-Fastest-Fast
-    def random_fastest_fast(self):
-        if self.torrent_flag:
-            self.torrent()
+    def random_fastest_fast(self, thread_id=None):
+        if self.own_table_num==config.constants.TEST_NODE_NUM:
+            neighbour_list = self.neighbour_list[thread_id]
+            require_table = 1 - self.node_owntable[thread_id]
+
+            k = min(config.constants.MAGIC_FIFO_NUM, len(neighbour_list))
+            top_k_neighbours = sorted(neighbour_list, key=lambda node: self.node_limit[node][0], reverse=True)[:k]
+
+
+            for neighbour in top_k_neighbours:
+                neighbour_has_table = self.node_owntable[neighbour]
+                both_one = np.logical_and(neighbour_has_table, require_table)
+                coordinates = np.where(both_one)
+                matching_coordinates = list(zip(coordinates[0], coordinates[1]))
+                command_send = Command(command=config.command.SEND, extra_information=matching_coordinates,
+                                       flag=config.command.RANDOM_FASTEST_FAST, recv=thread_id)
+                self.send_data(thread_id=neighbour, data=command_send)
+        else:
+            data = Command(command=config.command.OWNTABLE2TRACKER,
+                           extra_information=None, flag=config.command.RANDOM_FASTEST_FAST)
+            self.send_data_all(data=data)
 
     # scheduling algorithm3: Heuristics Greedy-Fastest-Fast
-    def greedy_fastest_fast(self):
-        if self.torrent_flag:
-            self.torrent()
+    def greedy_fastest_fast(self, thread_id=None):
+        if self.own_table_num==config.constants.TEST_NODE_NUM:
+            neighbour_list = self.neighbour_list[thread_id]
+            require_table = 1 - self.node_owntable[thread_id]
+
+            k = min(config.constants.MAGIC_FIFO_NUM, len(neighbour_list))
+            sorted_neighbours = sorted(neighbour_list, key=lambda node: self.node_limit[node][0], reverse=True)
+
+            for neighbour in sorted_neighbours:
+                neighbour_has_table = self.node_owntable[neighbour]
+                both_one = np.logical_and(neighbour_has_table, require_table)
+                coordinates = np.where(both_one)
+                matching_coordinates = list(zip(coordinates[0], coordinates[1]))[:self.node_limit[neighbour][0]//2]
+
+                command_send = Command(command=config.command.SEND, extra_information=matching_coordinates,
+                                       flag=config.command.GREEDY_FASTEST_FAST, recv=thread_id)
+                self.send_data(thread_id=neighbour, data=command_send)
+        else:
+            data = Command(command=config.command.OWNTABLE2TRACKER,
+                           extra_information=None, flag=config.command.GREEDY_FASTEST_FAST)
+            self.send_data_all(data=data)
 
     # scheduling algorithm4: Max flow
     def max_flow(self):
-        if self.torrent_flag:
-            self.torrent()
+        if self.own_table_num==config.constants.TEST_NODE_NUM:
+            pass
+        else:
+            data = Command(command=config.command.OWNTABLE2TRACKER,
+                           extra_information=None, flag=config.command.MAX_FLOW)
+            self.send_data_all(data=data)
 
     def choose_algo(self, command):
         if command == 'send':  # nomal torrent share file
-            self.algo_flag='send'
             self.torrent()
         elif command == 'randomfifo':  # scheduling algorithm1: Heuristics Random-FIFO
-            self.algo_flag = 'randomfifo'
             self.random_fifo()
         elif command == 'randomfastestfast':  # scheduling algorithm2: Heuristics Random-Fastest-Fast
-            self.algo_flag = 'randomfastestfast'
             self.random_fastest_fast()
         elif command == 'greedyfastestfast':  # scheduling algorithm3: Heuristics Greedy-Fastest-Fast
-            self.algo_flag = 'greedyfastestfast'
             self.greedy_fastest_fast()
         elif command == 'maxflow':  # scheduling algorithm4: Max flow
-            self.algo_flag = 'maxflow'
             self.max_flow()
         else:
             print("WRONG COMMAND!")
@@ -236,15 +316,8 @@ class Tracker:
         # receive command from the other
         while True:
             try:
-                thread_id, received_data = self.receive_queue.get_nowait()
-                received_data = Message.decode(received_data)
-                # Process the received data
-                self.process_command(received_data, thread_id)
-
                 # if the node num equal to the setting num, start test
-                if self.ok_nodes == config.constants.TEST_NODE_NUM and self.input_flag:
-                    print(self.ok_nodes)
-                    print(config.constants.TEST_NODE_NUM)
+                if len(self.threads.keys()) == config.constants.TEST_NODE_NUM and self.input_flag:
                     self.input_flag = False  # stop input command
                     # send the network node list to every node
                     node_list = list(self.threads.keys())
@@ -252,19 +325,36 @@ class Tracker:
                     self.send_data_all(data=data)
                     print("ENTER YOUR COMMAND!")
                     command = input()
+                    log_content = f"ALGORITHM IS: {command}"
+                    log(node_id=0, content=log_content, is_tracker=True)
                     self.start_time = time.time()
                     self.choose_algo(command)
 
+
+                thread_id, received_data = self.receive_queue.get_nowait()
+                received_data = Message.decode(received_data)
+                # Process the received data
+                self.process_command(received_data, thread_id)
+
+                if self.ok_torrent == config.constants.TEST_NODE_NUM:
+                    self.torrent()
+
                 # whole program finished
-                if self.finish_program_num == self.ok_nodes and self.input_flag == False:
+                if self.finish_program_num == len(self.threads.keys()) and self.input_flag == False:
                     print(f"PROGRAM FINISHED! TOTAL TIME: {self.finish_time:.3f} seconds")
-                    self.input_flag = True
+                    log_content = f"PROGRAM FINISHED! TOTAL TIME: {self.finish_time:.3f} seconds"
+                    log(node_id=0, content=log_content, is_tracker=True)
+                    data = Command(command=config.command.CLEAR_ALL, extra_information=node_list)
+                    self.send_data_all(data=data)
+
                     self.finish_program_num = 0
+                    self.ok_torrent = 0
+                    self.finish_time = 0
+                    self.input_flag = True  # for input command manualy
+                    self.start_time = 0
+                    self.debug_count = 0
             except queue.Empty:
                 continue  # No data received, continue to the next iteration
-
-            if self.algo_flag in ['send','randomfifo','randomfastestfast','greedyfastestfast','maxflow']:
-                self.choose_algo(self.algo_flag)
 
 
 
