@@ -30,8 +30,8 @@ class ConnectionThread(threading.Thread):
         self.initialized = threading.Event()
 
         #bandwith limit
-        self.uplink_limit = uplink*1024*1024  # mbytes per second
-        self.downlink_limit = downlink*1024*1024  # mbytes per second
+        self.uplink_limit = uplink*1024*1024*1024  # mbytes per second
+        self.downlink_limit = downlink*1024*1024*1024 # mbytes per second
         self.last_send_time = time.time()
         self.last_recv_time = time.time()
         self.sent_bytes = 0
@@ -46,7 +46,7 @@ class ConnectionThread(threading.Thread):
 
         # receive UUID
         remote_uuid_bytes = self.conn.recv(36)
-        print("Received raw data:", remote_uuid_bytes)
+        #print("Received raw data:", remote_uuid_bytes)
 
         try:
             self.id = remote_uuid_bytes.decode('utf-8')
@@ -73,90 +73,90 @@ class ConnectionThread(threading.Thread):
 
             readable, writable, exceptional = select.select(inputs, outputs, inputs, 0.1)
 
-            current_time = time.time()
-
-            for s in writable:
-                if current_time - self.last_send_time < 1 and self.sent_bytes >= self.uplink_limit:
-                    continue
-
-                try:
-                    bytes_to_send = min(len(self.send_buffer), self.uplink_limit - self.sent_bytes)
-                    sent = s.send(self.send_buffer[:bytes_to_send])
-                    self.send_buffer = self.send_buffer[sent:]
-                    self.sent_bytes += sent
-
-                    if not self.send_buffer:
-                        outputs.remove(s)
-
-                    if self.sent_bytes >= self.uplink_limit:
-                        self.last_send_time = current_time
-                        self.sent_bytes = 0
-                except (socket.error, BlockingIOError):
-                    pass
-
-            for s in readable:
-                if current_time - self.last_recv_time < 1 and self.received_bytes >= self.downlink_limit:
-                    continue
-
-                try:
-                    data = s.recv(min(4096, self.downlink_limit - self.received_bytes))
-                    if data:
-                        self.received_bytes += len(data)
-                        self.recv_buffer += data
-
-                        while len(self.recv_buffer) >= 4:
-                            message_len = struct.unpack('!I', self.recv_buffer[:4])[0]
-                            if len(self.recv_buffer) >= 4 + message_len:
-                                message = self.recv_buffer[4:4 + message_len]
-                                self.receive_queue.put((self.id, message))
-                                self.recv_buffer = self.recv_buffer[4 + message_len:]
-                            else:
-                                break
-
-                        if self.received_bytes >= self.downlink_limit:
-                            self.last_recv_time = current_time
-                            self.received_bytes = 0
-                    else:
-                        self.cleanup()
-                        inputs.remove(s)
-                        break
-                except (socket.error, BlockingIOError):
-                    break
-
+            # current_time = time.time()
+            #
             # for s in writable:
+            #     if current_time - self.last_send_time < 1 and self.sent_bytes >= self.uplink_limit:
+            #         continue
+            #
             #     try:
-            #         sent = s.send(self.send_buffer)
+            #         bytes_to_send = min(len(self.send_buffer), self.uplink_limit - self.sent_bytes)
+            #         sent = s.send(self.send_buffer[:bytes_to_send])
             #         self.send_buffer = self.send_buffer[sent:]
+            #         self.sent_bytes += sent
+            #
             #         if not self.send_buffer:
             #             outputs.remove(s)
+            #
+            #         if self.sent_bytes >= self.uplink_limit:
+            #             self.last_send_time = current_time
+            #             self.sent_bytes = 0
             #     except (socket.error, BlockingIOError):
             #         pass
             #
             # for s in readable:
+            #     if current_time - self.last_recv_time < 1 and self.received_bytes >= self.downlink_limit:
+            #         continue
+            #
             #     try:
-            #         # Receive data chunk
-            #         data = s.recv(4096)
+            #         data = s.recv(min(4096, self.downlink_limit - self.received_bytes))
             #         if data:
+            #             self.received_bytes += len(data)
             #             self.recv_buffer += data
-            #             # Process complete messages
-            #             while len(self.recv_buffer) >= 4:  # Assuming 4-byte header
-            #                 # Extract the message length
+            #
+            #             while len(self.recv_buffer) >= 4:
             #                 message_len = struct.unpack('!I', self.recv_buffer[:4])[0]
-            #                 # Check if the buffer has enough bytes for the message
             #                 if len(self.recv_buffer) >= 4 + message_len:
-            #                     # Extract the message
             #                     message = self.recv_buffer[4:4 + message_len]
             #                     self.receive_queue.put((self.id, message))
-            #                     # Remove the message from buffer
             #                     self.recv_buffer = self.recv_buffer[4 + message_len:]
             #                 else:
             #                     break
+            #
+            #             if self.received_bytes >= self.downlink_limit:
+            #                 self.last_recv_time = current_time
+            #                 self.received_bytes = 0
             #         else:
             #             self.cleanup()
             #             inputs.remove(s)
             #             break
             #     except (socket.error, BlockingIOError):
             #         break
+
+            for s in writable:
+                try:
+                    sent = s.send(self.send_buffer)
+                    self.send_buffer = self.send_buffer[sent:]
+                    if not self.send_buffer:
+                        outputs.remove(s)
+                except (socket.error, BlockingIOError):
+                    pass
+
+            for s in readable:
+                try:
+                    # Receive data chunk
+                    data = s.recv(4096)
+                    if data:
+                        self.recv_buffer += data
+                        # Process complete messages
+                        while len(self.recv_buffer) >= 4:  # Assuming 4-byte header
+                            # Extract the message length
+                            message_len = struct.unpack('!I', self.recv_buffer[:4])[0]
+                            # Check if the buffer has enough bytes for the message
+                            if len(self.recv_buffer) >= 4 + message_len:
+                                # Extract the message
+                                message = self.recv_buffer[4:4 + message_len]
+                                self.receive_queue.put((self.id, message))
+                                # Remove the message from buffer
+                                self.recv_buffer = self.recv_buffer[4 + message_len:]
+                            else:
+                                break
+                    else:
+                        self.cleanup()
+                        inputs.remove(s)
+                        break
+                except (socket.error, BlockingIOError):
+                    break
 
             for s in exceptional:
                 self.cleanup()

@@ -9,24 +9,26 @@ CFG = {
     },
     "constants": {
         "AVAILABLE_PORTS_RANGE": (1024, 65535), # range of available ports on the local computer
-        "TRACKER_ADDR": ('localhost', 12345),
+        "TRACKER_ADDR": ('localhost', 12347),
         #"TRACKER_ADDR": ('0.0.0.0', 12345),
         "MAX_UDP_SEGMENT_DATA_SIZE": 65527,
         "BUFFER_SIZE": 9216,        # MACOSX UDP MTU is 9216
         "CHUNK_PIECES_SIZE": 9216 - 2000, # Each chunk pieces(segments of UDP) must be lower than UDP buffer size
         "MAX_SPLITTNES_RATE": 8,    # number of neighboring peers which the node take chunks of a file in parallel
         "MAX_NODE_CONNECTION":10,
-        "MIN_NODE_CONNECTION":3,
+        "MIN_NODE_CONNECTION":5,
         "NODE_TIME_INTERVAL": 20,        # the interval time that each node periodically informs the tracker (in seconds)
         "TRACKER_TIME_INTERVAL": 22,     # the interval time that the tracker periodically checks which nodes are in the torrent (in seconds)
         "TRACKER_IP":'localhost',         # tracker ip
-        "CHUNK_SIZE":1*1024,         #chunk size
-        "GENERATE_FILE_SIZE": 100*1024, #generate file size is 10MB
-        "TEST_NODE_NUM": 30,              #the number of node which gonna test
-        "TIME_UNIT_LENGTH":100,           #time unit length is 100ms
-        "MIN_CHUNK_LIMIT":20,                  #chunk number for announce
+        "CHUNK_SIZE":1*1024*1024,         #chunk size
+        "GENERATE_FILE_SIZE": 10*1024*1024, #generate file size is 10MB
+        "TEST_NODE_NUM":20,              #the number of node which gonna test
+        "TIME_UNIT_LENGTH":1.0,           #time unit length is 1s
+        "MIN_CHUNK_LIMIT":10,                  #chunk number for announce
         "CHUNK_PERSECOND":10,
-        "MAGIC_FIFO_NUM":4,
+        "MAGIC_FIFO_NUM":5,
+        "COMMUNICATION_LAG":0.03,        #average communication lag set to 30ms
+        "RANDOM_LAG_TIMES":2,            # random lag= random_lag_times * average communication lag
     },
     "command": {
         "CONN": 0,                  # tracker tells the node to connect the other node
@@ -50,7 +52,13 @@ CFG = {
         "NODE_REQUEST":18,          # node request from the other node
         "OWNTABLE2TRACKER":19,      # node report its own table to tracker
         "OWNTABLE_RECV":20,         # tracker receive node's own table
-        "CLEAR_ALL":21              # tracker tells the node to return the init phase
+        "CLEAR_ALL":21,             # tracker tells the node to return the init phase
+        "UPONESLOT":22,             # node tells the tracker that finished one time slot of upload
+        "DOWNONESLOT":23,           # node tells the tracker that finished one time slot of download
+        "NEXTSLOT":24,              # tracker tells the node that it can go to the next time slot
+        "NODE_LIMIT":25,            # command used for transfer node limit
+        "REQUEST_FAIL":26,          # due to the uplink limit, the request failed
+        "ALGO_SEND":27,
     }
 }
 
